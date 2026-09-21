@@ -12,6 +12,7 @@ from tunegram.db import Database
 from tunegram.handlers import register_handlers
 from tunegram.music import register_music_handlers
 from tunegram.player import Player
+from tunegram.sources.youtube import warm_up
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -46,6 +47,7 @@ async def main() -> None:
         register_music_handlers(bot, player, me.username)
         commands += [
             BotCommand("play", "Play a song in the voice chat"),
+            BotCommand("vplay", "Play a video in the voice chat"),
             BotCommand("pause", "Pause playback"),
             BotCommand("resume", "Resume playback"),
             BotCommand("skip", "Skip the current track"),
@@ -62,6 +64,7 @@ async def main() -> None:
         )
     )
     stats.prime()
+    warm_task = asyncio.create_task(warm_up())  # keep the reference alive
     log.info("Bot started as @%s", me.username)
 
     try:

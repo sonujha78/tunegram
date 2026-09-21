@@ -7,7 +7,7 @@ name = "tunegram"
 version = "0.1.0"
 description = "A Telegram music bot focused on clean, high-quality playback."
 requires-python = ">=3.10"
-dependencies = ["python-dotenv>=1.0", "telethon>=1.36", "psutil>=6.0", "aiosqlite>=0.20", "yt-dlp[default]>=2025.11.12", "py-tgcalls>=2.0"]
+dependencies = ["python-dotenv>=1.0", "telethon>=1.36", "psutil>=6.0", "aiosqlite>=0.20", "yt-dlp[default]>=2025.11.12", "py-tgcalls>=2.0", "bgutil-ytdlp-pot-provider>=2.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

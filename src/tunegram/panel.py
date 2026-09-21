@@ -17,7 +17,7 @@ BAR_WIDTH = 10
 
 def panel_text(track: Track) -> str:
     lines = [
-        "▶️ <b>Now playing</b>",
+        "🎬 <b>Now playing (video)</b>" if track.video else "▶️ <b>Now playing</b>",
         "",
         html.escape(track.title),
         f"⏱ {format_duration(track.duration)} • {html.escape(track.uploader)}",

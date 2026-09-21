@@ -4,6 +4,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -12,6 +14,19 @@ from dotenv import load_dotenv
 from yt_dlp.utils import DownloadError
 
 load_dotenv()
+
+_local = threading.local()
+
+
+@contextmanager
+def _persistent_ydl(kind: str, opts: dict):
+    """Reuse one YoutubeDL per worker thread and per kind (search/resolve/download).
+    Keeps HTTP connections, cookies and the PO-token / JS-challenge caches warm."""
+    ydl = getattr(_local, kind, None)
+    if ydl is None:
+        ydl = yt_dlp.YoutubeDL(opts)
+        setattr(_local, kind, ydl)
+    yield ydl
 
 
 class SourceError(Exception):
@@ -29,6 +44,7 @@ class Track:
     stream_url: str | None = None  # direct audio URL (resolve() se bharta hai)
     headers: dict | None = None  # stream kholne ke liye zaruri HTTP headers (User-Agent etc.)
     requested_by: str = ""  # who asked for this track (shown in the panel)
+    video: bool = False  # True for /vplay tracks
 
 
 def _base_opts() -> dict:
@@ -63,7 +79,7 @@ def is_url(text: str) -> bool:
 def _search_sync(query: str, limit: int) -> list[Track]:
     opts = {**_base_opts(), "extract_flat": True}
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _persistent_ydl("search", opts) as ydl:
             info = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
     except DownloadError as exc:
         raise SourceError(f"Search failed: {exc}") from exc
@@ -89,7 +105,7 @@ def _search_sync(query: str, limit: int) -> list[Track]:
 def _resolve_sync(url: str) -> Track:
     opts = {**_base_opts(), "format": "bestaudio/best"}
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _persistent_ydl("resolve", opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except DownloadError as exc:
         raise SourceError(f"Could not get audio: {exc}") from exc
@@ -148,8 +164,8 @@ AUDIO_FORMAT = "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio"
 def _download_sync(track: Track) -> Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for f in CACHE_DIR.glob(f"{track.id}.*"):
-        if f.suffix not in (".part", ".ytdl"):
-            return f  # pehle se cache me hai
+        if f.stem == track.id and f.suffix not in (".part", ".ytdl"):
+            return f  # already cached
 
     opts = {
         **_base_opts(),
@@ -158,7 +174,7 @@ def _download_sync(track: Track) -> Path:
         "outtmpl": str(CACHE_DIR / "%(id)s.%(ext)s"),
     }
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with _persistent_ydl("download", opts) as ydl:
             info = ydl.extract_info(track.webpage_url, download=True)
             path = Path(ydl.prepare_filename(info))
     except DownloadError as exc:
@@ -172,6 +188,57 @@ def _download_sync(track: Track) -> Path:
 async def download(track: Track) -> Path:
     """Audio ko data/cache me download karo aur local file ka path do."""
     return await asyncio.to_thread(_download_sync, track)
+
+
+async def warm_up() -> None:
+    """One throw-away extraction at startup so the first /play is not slow
+    (caches the YouTube player script and starts the JS runtime)."""
+    try:
+        await asyncio.to_thread(
+            _resolve_sync, "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        )
+    except Exception:
+        pass
+
+
+VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "480"))  # 360, 480 or 720
+VIDEO_FORMAT = (
+    f"bv*[height<=?{VIDEO_HEIGHT}][vcodec^=avc1]+ba[ext=m4a]/"
+    f"bv*[height<=?{VIDEO_HEIGHT}]+ba/"
+    f"b[height<=?{VIDEO_HEIGHT}]"
+)
+
+
+def _download_video_sync(track: Track) -> Path:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    for f in CACHE_DIR.glob(f"{track.id}.v{VIDEO_HEIGHT}.*"):
+        if f.suffix not in (".part", ".ytdl"):
+            return f  # already cached
+
+    opts = {
+        **_base_opts(),
+        "skip_download": False,
+        "format": VIDEO_FORMAT,
+        "merge_output_format": "mp4",
+        "outtmpl": str(CACHE_DIR / f"%(id)s.v{VIDEO_HEIGHT}.%(ext)s"),
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(track.webpage_url, download=True)
+    except DownloadError as exc:
+        raise SourceError(f"Video download failed: {exc}") from exc
+
+    downloads = info.get("requested_downloads") or []
+    filepath = downloads[0].get("filepath") if downloads else None
+    path = Path(filepath) if filepath else None
+    if not path or not path.is_file():
+        raise SourceError("Video download finished but the file was not found")
+    return path
+
+
+async def download_video(track: Track) -> Path:
+    """Download video (up to VIDEO_HEIGHT p) with audio into data/cache; return the path."""
+    return await asyncio.to_thread(_download_video_sync, track)
 
 
 async def _cli(query: str, play: bool) -> None:

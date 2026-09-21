@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 
 from pytgcalls import PyTgCalls, filters
 from pytgcalls.exceptions import NoActiveGroupCall, NotInCallError
-from pytgcalls.types import AudioQuality, MediaStream, StreamEnded
+from pytgcalls.types import AudioQuality, MediaStream, StreamEnded, VideoQuality
 from telethon import TelegramClient
 from telethon.errors import (
     ChatAdminInviteRequiredError,
@@ -19,11 +19,16 @@ from telethon.errors import (
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import ExportChatInviteRequest, ImportChatInviteRequest
 
-from tunegram.sources.youtube import Track, download
+from tunegram.sources.youtube import VIDEO_HEIGHT, Track, download, download_video
 
 log = logging.getLogger("tunegram.player")
 
 MAX_QUEUE = 20
+VIDEO_QUALITY = {
+    360: VideoQuality.SD_360p,
+    480: VideoQuality.SD_480p,
+    720: VideoQuality.HD_720p,
+}.get(VIDEO_HEIGHT, VideoQuality.SD_480p)
 IDLE_LEAVE_SECONDS = 15  # assistant leaves the group this long after playback stops
 
 
@@ -144,12 +149,20 @@ class Player:
     # ---- internals ----
 
     async def _start(self, chat_id: int, track: Track) -> None:
-        path = await download(track)  # cache hit if already downloaded
-        stream = MediaStream(
-            str(path),
-            audio_parameters=AudioQuality.HIGH,
-            video_flags=MediaStream.Flags.IGNORE,  # audio only
-        )
+        if track.video:
+            path = await download_video(track)  # cache hit if already downloaded
+            stream = MediaStream(
+                str(path),
+                audio_parameters=AudioQuality.HIGH,
+                video_parameters=VIDEO_QUALITY,
+            )
+        else:
+            path = await download(track)  # cache hit if already downloaded
+            stream = MediaStream(
+                str(path),
+                audio_parameters=AudioQuality.HIGH,
+                video_flags=MediaStream.Flags.IGNORE,  # audio only
+            )
         try:
             # If the assistant is already in the call, this just switches the stream (gapless)
             await self.calls.play(chat_id, stream)

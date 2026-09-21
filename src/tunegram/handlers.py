@@ -15,6 +15,7 @@ HELP_TEXT = (
     "/help - Show this help\n"
     "/ping - Check bot latency\n"
     "/play <song or link> - Play in the group voice chat\n"
+    "/vplay <video or link> - Play a video in the voice chat\n"
     "/pause - Pause playback\n"
     "/resume - Resume playback\n"
     "/skip - Skip the current track\n"
