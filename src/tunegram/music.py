@@ -1,10 +1,12 @@
-"""Group commands: /play /skip /queue /pause /resume /stop."""
+"""Group commands: /play /skip /queue /pause /resume /stop and the now-playing buttons."""
 import html
 import logging
 import re
+from dataclasses import replace
 
 from telethon import TelegramClient, events
 
+from tunegram.panel import PanelManager
 from tunegram.player import Player, PlayerError
 from tunegram.sources.youtube import (
     SourceError,
@@ -57,13 +59,6 @@ async def first_downloadable(candidates: list[Track]) -> Track:
     raise SourceError(reason)
 
 
-def now_playing_text(track: Track) -> str:
-    return (
-        f"▶️ <b>Now playing</b>\n{html.escape(track.title)}\n"
-        f"⏱ {format_duration(track.duration)} • {html.escape(track.uploader)}"
-    )
-
-
 def queue_text(current: Track | None, upcoming: list[Track]) -> str:
     if current is None:
         return "The queue is empty. Use /play to add a song."
@@ -81,6 +76,8 @@ def queue_text(current: Track | None, upcoming: list[Track]) -> str:
 
 
 def register_music_handlers(bot: TelegramClient, player: Player, bot_username: str) -> None:
+    panels = PanelManager(bot, player)
+
     def cmd(name: str, args: bool = False) -> events.NewMessage:
         tail = r"(?:\s+(.+))?" if args else ""
         # match /cmd and /cmd@thisbot only, never /cmd@otherbot
@@ -92,8 +89,7 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
     async def group_only(event) -> bool:
         if event.is_private:
             await event.respond(
-                "This command works in groups. Add me to your group "
-                "and use /play there."
+                "This command works in groups. Add me to your group and use /play there."
             )
             return False
         return True
@@ -109,23 +105,32 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
             )
             return
 
+        sender = await event.get_sender()
+        requester = (
+            getattr(sender, "first_name", None) or getattr(sender, "title", None) or "Unknown"
+        )
+
         status = await event.respond("🔎 Searching...")
         try:
             candidates = await find_candidates(query)
             await player.ensure_assistant(bot, event.chat_id)
             await status.edit("⬇️ Preparing audio...")
             track = await first_downloadable(candidates)
+            track = replace(track, requested_by=requester)
             position = await player.enqueue(event.chat_id, track)
         except (PlayerError, SourceError) as exc:
             await status.edit(f"❌ {html.escape(str(exc)[:300])}", parse_mode="html")
+            player.leave_if_idle(event.chat_id)
             return
         except Exception:
             log.exception("play failed")
             await status.edit("❌ Something went wrong. Please try again.")
+            player.leave_if_idle(event.chat_id)
             return
 
         if position == 0:
-            await status.edit(now_playing_text(track), parse_mode="html")
+            await status.delete()
+            await panels.show(event.chat_id, track)
         else:
             await status.edit(
                 f"➕ <b>Added to queue</b> (#{position})\n{html.escape(track.title)}\n"
@@ -139,6 +144,10 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
             return
         current, upcoming = player.snapshot(event.chat_id)
         await event.respond(queue_text(current, upcoming), parse_mode="html")
+
+    async def do_stop(chat_id: int) -> None:
+        await player.stop(chat_id)
+        await panels.close(chat_id)
 
     def control(name: str, action, ok_text: str) -> None:
         @bot.on(cmd(name))
@@ -155,16 +164,38 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
     control("pause", player.pause, "⏸ Paused")
     control("resume", player.resume, "▶️ Resumed")
     control("skip", player.skip, "⏭ Skipped")
-    control("stop", player.stop, "⏹ Stopped and queue cleared")
+    control("stop", do_stop, "⏹ Stopped and queue cleared")
+
+    button_actions = {
+        "resume": (player.resume, "▶️ Resumed"),
+        "pause": (player.pause, "⏸ Paused"),
+        "skip": (player.skip, "⏭ Skipped"),
+        "stop": (do_stop, "⏹ Stopped"),
+    }
+
+    @bot.on(events.CallbackQuery(pattern=rb"^np:(noop|resume|pause|skip|stop)$"))
+    async def panel_button(event):
+        action = event.pattern_match.group(1).decode()
+        if action == "noop":
+            await event.answer()
+            return
+        fn, toast = button_actions[action]
+        try:
+            await fn(event.chat_id)
+        except PlayerError as exc:
+            await event.answer(str(exc), alert=True)
+            return
+        await event.answer(toast)
 
     async def track_started(chat_id: int, track: Track) -> None:
         try:
-            await bot.send_message(chat_id, now_playing_text(track), parse_mode="html")
+            await panels.show(chat_id, track)
         except Exception:
-            log.exception("could not send now-playing message")
+            log.exception("could not show now-playing panel")
 
     async def queue_finished(chat_id: int) -> None:
         try:
+            await panels.close(chat_id)
             await bot.send_message(chat_id, "✅ Queue finished.")
         except Exception:
             log.exception("could not send finish message")

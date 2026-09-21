@@ -24,6 +24,7 @@ from tunegram.sources.youtube import Track, download
 log = logging.getLogger("tunegram.player")
 
 MAX_QUEUE = 20
+IDLE_LEAVE_SECONDS = 15  # assistant leaves the group this long after playback stops
 
 
 class PlayerError(Exception):
@@ -37,6 +38,8 @@ class Player:
         self.now_playing: dict[int, Track] = {}
         self.queues: dict[int, deque[Track]] = {}
         self._locks: dict[int, asyncio.Lock] = {}
+        self._members: set[int] = set()  # groups the assistant is currently in
+        self._leave_tasks: dict[int, asyncio.Task] = {}
         # callbacks set by the command layer
         self.on_track_start: Callable[[int, Track], Awaitable[None]] | None = None
         self.on_queue_end: Callable[[int], Awaitable[None]] | None = None
@@ -50,7 +53,8 @@ class Player:
             raise RuntimeError(
                 "SESSION_STRING is invalid or expired. Run scripts/gen_session.py again."
             )
-        await self.userbot.get_dialogs()  # fill the peer cache so groups can be resolved
+        dialogs = await self.userbot.get_dialogs()  # also fills the peer cache
+        self._members = {d.id for d in dialogs if d.is_group}
         await self.calls.start()
 
         @self.calls.on_update(filters.stream_end())
@@ -65,39 +69,77 @@ class Player:
         return me.first_name or "assistant"
 
     async def close(self) -> None:
+        for task in list(self._leave_tasks.values()):
+            task.cancel()
         await self.userbot.disconnect()
 
+    # ---- assistant membership ----
+
     async def ensure_assistant(self, bot: TelegramClient, chat_id: int) -> None:
-        """Make sure the assistant account is in the group; join it via invite link if not."""
-        try:
-            await self.userbot.get_input_entity(chat_id)
-            return  # assistant already knows this chat, so it is a member
-        except ValueError:
-            pass  # not in the group yet
+        """Make sure the assistant is in the group; join it via invite link if not."""
+        self.cancel_idle_leave(chat_id)
+        async with self._lock(chat_id):  # waits if an idle-leave is in progress
+            if chat_id in self._members:
+                return
 
-        try:
-            invite = await bot(
-                ExportChatInviteRequest(chat_id, usage_limit=1, title="assistant")
-            )
-        except (ChatAdminRequiredError, ChatAdminInviteRequiredError):
-            raise PlayerError(
-                "Make me an admin with the 'Invite users via link' permission "
-                "so my assistant can join this group, then try again."
-            ) from None
+            try:
+                invite = await bot(
+                    ExportChatInviteRequest(chat_id, usage_limit=1, title="assistant")
+                )
+            except (ChatAdminRequiredError, ChatAdminInviteRequiredError):
+                raise PlayerError(
+                    "Make me an admin with the 'Invite users via link' permission "
+                    "so my assistant can join this group, then try again."
+                ) from None
 
-        invite_hash = invite.link.rsplit("/", 1)[-1].lstrip("+")
+            invite_hash = invite.link.rsplit("/", 1)[-1].lstrip("+")
+            try:
+                await self.userbot(ImportChatInviteRequest(invite_hash))
+            except UserAlreadyParticipantError:
+                pass
+            except UserBannedInChannelError:
+                raise PlayerError(
+                    "The assistant account is banned in this group. Unban it and try again."
+                ) from None
+            except (InviteHashExpiredError, InviteHashInvalidError):
+                raise PlayerError(
+                    "Could not join with the invite link. Please try again."
+                ) from None
+            await self.userbot.get_dialogs(limit=50)
+            self._members.add(chat_id)
+            log.info("Assistant joined chat %s", chat_id)
+
+    def schedule_idle_leave(self, chat_id: int) -> None:
+        self.cancel_idle_leave(chat_id)
+        self._leave_tasks[chat_id] = asyncio.create_task(self._idle_leave(chat_id))
+
+    def cancel_idle_leave(self, chat_id: int) -> None:
+        task = self._leave_tasks.pop(chat_id, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+
+    def leave_if_idle(self, chat_id: int) -> None:
+        """Call after a failed /play: if nothing is playing, let the assistant leave."""
+        if chat_id not in self.now_playing:
+            self.schedule_idle_leave(chat_id)
+
+    async def _idle_leave(self, chat_id: int) -> None:
         try:
-            await self.userbot(ImportChatInviteRequest(invite_hash))
-        except UserAlreadyParticipantError:
+            await asyncio.sleep(IDLE_LEAVE_SECONDS)
+            async with self._lock(chat_id):
+                if chat_id in self.now_playing:
+                    return  # something started playing again
+                self._members.discard(chat_id)
+                try:
+                    await self.userbot.delete_dialog(chat_id)  # leaves the group
+                    log.info("Assistant left chat %s (idle)", chat_id)
+                except Exception:
+                    log.warning("Assistant could not leave chat %s", chat_id, exc_info=True)
+        except asyncio.CancelledError:
             pass
-        except UserBannedInChannelError:
-            raise PlayerError(
-                "The assistant account is banned in this group. Unban it and try again."
-            ) from None
-        except (InviteHashExpiredError, InviteHashInvalidError):
-            raise PlayerError("Could not join with the invite link. Please try again.") from None
-        await self.userbot.get_dialogs(limit=50)
-        log.info("Assistant joined chat %s", chat_id)
+        finally:
+            if self._leave_tasks.get(chat_id) is asyncio.current_task():
+                self._leave_tasks.pop(chat_id, None)
 
     # ---- internals ----
 
@@ -124,7 +166,7 @@ class Player:
             ) from exc
         self.now_playing[chat_id] = track
 
-    async def _leave(self, chat_id: int) -> None:
+    async def _leave_call(self, chat_id: int) -> None:
         try:
             await self.calls.leave_call(chat_id)
         except Exception:
@@ -145,7 +187,8 @@ class Player:
                 if self.on_track_start:
                     await self.on_track_start(chat_id, track)
                 return track
-            await self._leave(chat_id)
+            await self._leave_call(chat_id)
+        self.schedule_idle_leave(chat_id)
         if self.on_queue_end:
             await self.on_queue_end(chat_id)
         return None
@@ -160,6 +203,7 @@ class Player:
 
     async def enqueue(self, chat_id: int, track: Track) -> int:
         """Add a track. Returns 0 if it started playing now, else its 1-based queue position."""
+        self.cancel_idle_leave(chat_id)
         async with self._lock(chat_id):
             if chat_id not in self.now_playing:
                 await self._start(chat_id, track)
@@ -178,6 +222,13 @@ class Player:
     def snapshot(self, chat_id: int) -> tuple[Track | None, list[Track]]:
         return self.now_playing.get(chat_id), list(self.queues.get(chat_id, []))
 
+    async def position(self, chat_id: int) -> int | None:
+        """Seconds played of the current track, or None if unknown."""
+        try:
+            return int(await self.calls.time(chat_id))
+        except Exception:
+            return None
+
     async def pause(self, chat_id: int) -> None:
         await self._control(self.calls.pause, chat_id)
 
@@ -189,3 +240,4 @@ class Player:
             self.queues.pop(chat_id, None)
             await self._control(self.calls.leave_call, chat_id)
             self.now_playing.pop(chat_id, None)
+        self.schedule_idle_leave(chat_id)

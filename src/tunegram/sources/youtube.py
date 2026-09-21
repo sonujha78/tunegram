@@ -28,6 +28,7 @@ class Track:
     thumbnail: str | None = None
     stream_url: str | None = None  # direct audio URL (resolve() se bharta hai)
     headers: dict | None = None  # stream kholne ke liye zaruri HTTP headers (User-Agent etc.)
+    requested_by: str = ""  # who asked for this track (shown in the panel)
 
 
 def _base_opts() -> dict:
