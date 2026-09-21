@@ -1,4 +1,4 @@
-"""Group commands: /play /pause /resume /stop."""
+"""Group commands: /play /skip /queue /pause /resume /stop."""
 import html
 import logging
 import re
@@ -57,6 +57,29 @@ async def first_downloadable(candidates: list[Track]) -> Track:
     raise SourceError(reason)
 
 
+def now_playing_text(track: Track) -> str:
+    return (
+        f"▶️ <b>Now playing</b>\n{html.escape(track.title)}\n"
+        f"⏱ {format_duration(track.duration)} • {html.escape(track.uploader)}"
+    )
+
+
+def queue_text(current: Track | None, upcoming: list[Track]) -> str:
+    if current is None:
+        return "The queue is empty. Use /play to add a song."
+    lines = [
+        "🎶 <b>Now playing</b>",
+        f"{html.escape(current.title)} ({format_duration(current.duration)})",
+    ]
+    if upcoming:
+        lines += ["", "📜 <b>Up next</b>"]
+        for i, t in enumerate(upcoming[:10], 1):
+            lines.append(f"{i}. {html.escape(t.title)} ({format_duration(t.duration)})")
+        if len(upcoming) > 10:
+            lines.append(f"... and {len(upcoming) - 10} more")
+    return "\n".join(lines)
+
+
 def register_music_handlers(bot: TelegramClient, player: Player, bot_username: str) -> None:
     def cmd(name: str, args: bool = False) -> events.NewMessage:
         tail = r"(?:\s+(.+))?" if args else ""
@@ -69,8 +92,8 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
     async def group_only(event) -> bool:
         if event.is_private:
             await event.respond(
-                "This command works in groups. Add me to your group, "
-                "start a voice chat and use /play there."
+                "This command works in groups. Add me to your group "
+                "and use /play there."
             )
             return False
         return True
@@ -92,7 +115,7 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
             await player.ensure_assistant(bot, event.chat_id)
             await status.edit("⬇️ Preparing audio...")
             track = await first_downloadable(candidates)
-            await player.play(event.chat_id, track)
+            position = await player.enqueue(event.chat_id, track)
         except (PlayerError, SourceError) as exc:
             await status.edit(f"❌ {html.escape(str(exc)[:300])}", parse_mode="html")
             return
@@ -101,11 +124,21 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
             await status.edit("❌ Something went wrong. Please try again.")
             return
 
-        await status.edit(
-            f"▶️ <b>Now playing</b>\n{html.escape(track.title)}\n"
-            f"⏱ {format_duration(track.duration)} • {html.escape(track.uploader)}",
-            parse_mode="html",
-        )
+        if position == 0:
+            await status.edit(now_playing_text(track), parse_mode="html")
+        else:
+            await status.edit(
+                f"➕ <b>Added to queue</b> (#{position})\n{html.escape(track.title)}\n"
+                f"⏱ {format_duration(track.duration)}",
+                parse_mode="html",
+            )
+
+    @bot.on(cmd("queue"))
+    async def show_queue(event):
+        if not await group_only(event):
+            return
+        current, upcoming = player.snapshot(event.chat_id)
+        await event.respond(queue_text(current, upcoming), parse_mode="html")
 
     def control(name: str, action, ok_text: str) -> None:
         @bot.on(cmd(name))
@@ -121,12 +154,20 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
 
     control("pause", player.pause, "⏸ Paused")
     control("resume", player.resume, "▶️ Resumed")
-    control("stop", player.stop, "⏹ Stopped")
+    control("skip", player.skip, "⏭ Skipped")
+    control("stop", player.stop, "⏹ Stopped and queue cleared")
 
-    async def finished(chat_id: int) -> None:
+    async def track_started(chat_id: int, track: Track) -> None:
         try:
-            await bot.send_message(chat_id, "✅ Playback finished.")
+            await bot.send_message(chat_id, now_playing_text(track), parse_mode="html")
+        except Exception:
+            log.exception("could not send now-playing message")
+
+    async def queue_finished(chat_id: int) -> None:
+        try:
+            await bot.send_message(chat_id, "✅ Queue finished.")
         except Exception:
             log.exception("could not send finish message")
 
-    player.on_end = finished
+    player.on_track_start = track_started
+    player.on_queue_end = queue_finished

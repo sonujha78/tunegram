@@ -1,5 +1,7 @@
-"""Voice chat player: assistant (userbot) account + PyTgCalls."""
+"""Voice chat player: assistant (userbot) account + PyTgCalls, with per-chat queues."""
+import asyncio
 import logging
+from collections import deque
 from collections.abc import Awaitable, Callable
 
 from pytgcalls import PyTgCalls, filters
@@ -21,6 +23,8 @@ from tunegram.sources.youtube import Track, download
 
 log = logging.getLogger("tunegram.player")
 
+MAX_QUEUE = 20
+
 
 class PlayerError(Exception):
     """Error message that is safe to show to users."""
@@ -31,7 +35,14 @@ class Player:
         self.userbot = TelegramClient(StringSession(session_string), api_id, api_hash)
         self.calls = PyTgCalls(self.userbot)
         self.now_playing: dict[int, Track] = {}
-        self.on_end: Callable[[int], Awaitable[None]] | None = None
+        self.queues: dict[int, deque[Track]] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
+        # callbacks set by the command layer
+        self.on_track_start: Callable[[int, Track], Awaitable[None]] | None = None
+        self.on_queue_end: Callable[[int], Awaitable[None]] | None = None
+
+    def _lock(self, chat_id: int) -> asyncio.Lock:
+        return self._locks.setdefault(chat_id, asyncio.Lock())
 
     async def start(self) -> str:
         await self.userbot.connect()
@@ -44,15 +55,11 @@ class Player:
 
         @self.calls.on_update(filters.stream_end())
         async def _stream_ended(_, update: StreamEnded) -> None:
-            chat_id = update.chat_id
-            self.now_playing.pop(chat_id, None)
-            log.info("Stream ended in chat %s", chat_id)
+            log.info("Stream ended in chat %s", update.chat_id)
             try:
-                await self.calls.leave_call(chat_id)
+                await self._advance(update.chat_id)
             except Exception:
-                log.debug("leave_call after end failed", exc_info=True)
-            if self.on_end:
-                await self.on_end(chat_id)
+                log.exception("advance after stream end failed")
 
         me = await self.userbot.get_me()
         return me.first_name or "assistant"
@@ -92,14 +99,17 @@ class Player:
         await self.userbot.get_dialogs(limit=50)
         log.info("Assistant joined chat %s", chat_id)
 
-    async def play(self, chat_id: int, track: Track) -> None:
-        path = await download(track)
+    # ---- internals ----
+
+    async def _start(self, chat_id: int, track: Track) -> None:
+        path = await download(track)  # cache hit if already downloaded
         stream = MediaStream(
             str(path),
             audio_parameters=AudioQuality.HIGH,
             video_flags=MediaStream.Flags.IGNORE,  # audio only
         )
         try:
+            # If the assistant is already in the call, this just switches the stream (gapless)
             await self.calls.play(chat_id, stream)
         except NoActiveGroupCall:
             raise PlayerError(
@@ -108,16 +118,65 @@ class Player:
         except Exception as exc:
             log.exception("calls.play failed")
             raise PlayerError(
-                "Could not join the voice chat. Make sure a voice chat is running "
-                "and try again."
+                "Could not join the voice chat. Start a voice chat in the group "
+                "(or make the assistant an admin with 'Manage video chats' so it can "
+                "start one) and try again."
             ) from exc
         self.now_playing[chat_id] = track
+
+    async def _leave(self, chat_id: int) -> None:
+        try:
+            await self.calls.leave_call(chat_id)
+        except Exception:
+            log.debug("leave_call failed", exc_info=True)
+
+    async def _advance(self, chat_id: int) -> Track | None:
+        """Play the next queued track, or leave the call if the queue is empty."""
+        async with self._lock(chat_id):
+            self.now_playing.pop(chat_id, None)
+            queue = self.queues.get(chat_id)
+            while queue:
+                track = queue.popleft()
+                try:
+                    await self._start(chat_id, track)
+                except Exception as exc:
+                    log.warning("Skipping queued track %s: %s", track.id, exc)
+                    continue
+                if self.on_track_start:
+                    await self.on_track_start(chat_id, track)
+                return track
+            await self._leave(chat_id)
+        if self.on_queue_end:
+            await self.on_queue_end(chat_id)
+        return None
 
     async def _control(self, fn, chat_id: int):
         try:
             return await fn(chat_id)
         except (NotInCallError, NoActiveGroupCall):
             raise PlayerError("Nothing is playing in this group right now.") from None
+
+    # ---- public API ----
+
+    async def enqueue(self, chat_id: int, track: Track) -> int:
+        """Add a track. Returns 0 if it started playing now, else its 1-based queue position."""
+        async with self._lock(chat_id):
+            if chat_id not in self.now_playing:
+                await self._start(chat_id, track)
+                return 0
+            queue = self.queues.setdefault(chat_id, deque())
+            if len(queue) >= MAX_QUEUE:
+                raise PlayerError(f"The queue is full ({MAX_QUEUE} tracks).")
+            queue.append(track)
+            return len(queue)
+
+    async def skip(self, chat_id: int) -> None:
+        if chat_id not in self.now_playing:
+            raise PlayerError("Nothing is playing in this group right now.")
+        await self._advance(chat_id)
+
+    def snapshot(self, chat_id: int) -> tuple[Track | None, list[Track]]:
+        return self.now_playing.get(chat_id), list(self.queues.get(chat_id, []))
 
     async def pause(self, chat_id: int) -> None:
         await self._control(self.calls.pause, chat_id)
@@ -126,5 +185,7 @@ class Player:
         await self._control(self.calls.resume, chat_id)
 
     async def stop(self, chat_id: int) -> None:
-        await self._control(self.calls.leave_call, chat_id)
-        self.now_playing.pop(chat_id, None)
+        async with self._lock(chat_id):
+            self.queues.pop(chat_id, None)
+            await self._control(self.calls.leave_call, chat_id)
+            self.now_playing.pop(chat_id, None)

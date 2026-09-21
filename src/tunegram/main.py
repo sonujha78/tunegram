@@ -48,7 +48,9 @@ async def main() -> None:
             BotCommand("play", "Play a song in the voice chat"),
             BotCommand("pause", "Pause playback"),
             BotCommand("resume", "Resume playback"),
-            BotCommand("stop", "Stop and leave the voice chat"),
+            BotCommand("skip", "Skip the current track"),
+            BotCommand("queue", "Show the queue"),
+            BotCommand("stop", "Stop, clear the queue and leave"),
         ]
         log.info("Userbot ready: %s", name)
     else:

@@ -17,8 +17,9 @@ HELP_TEXT = (
     "/play <song or link> - Play in the group voice chat\n"
     "/pause - Pause playback\n"
     "/resume - Resume playback\n"
-    "/stop - Stop and leave the voice chat\n\n"
-    "Queue and skip are coming soon."
+    "/skip - Skip the current track\n"
+    "/queue - Show the queue\n"
+    "/stop - Stop, clear the queue and leave the voice chat"
 )
 
 
