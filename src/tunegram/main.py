@@ -11,6 +11,7 @@ from tunegram.config import load_config
 from tunegram.db import Database
 from tunegram.handlers import register_handlers
 from tunegram.music import register_music_handlers
+from tunegram.cachegc import cache_janitor
 from tunegram.player import Player
 from tunegram.sources.youtube import warm_up
 
@@ -44,7 +45,7 @@ async def main() -> None:
     if cfg.session_string:
         player = Player(cfg.api_id, cfg.api_hash, cfg.session_string)
         name = await player.start()
-        register_music_handlers(bot, player, me.username)
+        register_music_handlers(bot, player, me.username, db)
         commands += [
             BotCommand("play", "Play a song in the voice chat"),
             BotCommand("vplay", "Play a video in the voice chat"),
@@ -64,12 +65,15 @@ async def main() -> None:
         )
     )
     stats.prime()
+    janitor = asyncio.create_task(cache_janitor(player)) if player else None
     warm_task = asyncio.create_task(warm_up())  # keep the reference alive
     log.info("Bot started as @%s", me.username)
 
     try:
         await bot.run_until_disconnected()
     finally:
+        if janitor:
+            janitor.cancel()
         if player:
             await player.close()
         await db.close()

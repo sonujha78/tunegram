@@ -158,6 +158,17 @@ async def get_track(query: str) -> Track:
 
 
 CACHE_DIR = Path("data/cache")
+
+
+def _touch(path: Path) -> Path:
+    """Mark a cached file as recently used (cleanup deletes least-recently-used first)."""
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+    return path
+
+
 AUDIO_FORMAT = "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio"
 
 
@@ -165,7 +176,7 @@ def _download_sync(track: Track) -> Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for f in CACHE_DIR.glob(f"{track.id}.*"):
         if f.stem == track.id and f.suffix not in (".part", ".ytdl"):
-            return f  # already cached
+            return _touch(f)  # already cached
 
     opts = {
         **_base_opts(),
@@ -213,7 +224,7 @@ def _download_video_sync(track: Track) -> Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     for f in CACHE_DIR.glob(f"{track.id}.v{VIDEO_HEIGHT}.*"):
         if f.suffix not in (".part", ".ytdl"):
-            return f  # already cached
+            return _touch(f)  # already cached
 
     opts = {
         **_base_opts(),

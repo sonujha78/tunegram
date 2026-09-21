@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from telethon import TelegramClient, events
 
+from tunegram.db import Database
 from tunegram.panel import PanelManager
 from tunegram.player import Player, PlayerError
 from tunegram.sources.youtube import (
@@ -26,6 +27,7 @@ log = logging.getLogger("tunegram.music")
 MAX_DURATION = 3600  # seconds; longer audio is rejected
 MAX_VIDEO_DURATION = 1800  # seconds; videos are big, so the limit is lower
 MAX_TRIES = 4  # how many search results to try before giving up
+CACHED_FIELDS = ("id", "title", "uploader", "duration", "webpage_url", "thumbnail")
 
 
 def _mostly_latin(text: str) -> bool:
@@ -107,7 +109,9 @@ def queue_text(current: Track | None, upcoming: list[Track]) -> str:
     return "\n".join(lines)
 
 
-def register_music_handlers(bot: TelegramClient, player: Player, bot_username: str) -> None:
+def register_music_handlers(
+    bot: TelegramClient, player: Player, bot_username: str, db: Database
+) -> None:
     panels = PanelManager(bot, player)
 
     def cmd(name: str, args: bool = False) -> events.NewMessage:
@@ -147,7 +151,11 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
         status = await event.respond("🔎 Searching...")
         try:
             t0 = time.perf_counter()
-            candidates = await find_candidates(query, video=video)
+            query_key = " ".join(query.lower().split())
+            cached = None if is_url(query) else await db.get_cached_track(query_key, video)
+            candidates = (
+                [Track(**cached)] if cached else await find_candidates(query, video=video)
+            )
             t1 = time.perf_counter()
             await status.edit(
                 f"⬇️ Loading{' video' if video else ''}: "
@@ -160,10 +168,18 @@ def register_music_handlers(bot: TelegramClient, player: Player, bot_username: s
                 first_downloadable(candidates, video=video),
                 return_exceptions=True,
             )
+            if cached and isinstance(track_result, SourceError):
+                # the remembered result stopped working (removed video, etc.): search again
+                await db.delete_cached_track(query_key, video)
+                candidates = await find_candidates(query, video=video)
+                track_result = await first_downloadable(candidates, video=video)
             for result in (join_result, track_result):
                 if isinstance(result, BaseException):
                     raise result
             t2 = time.perf_counter()
+            if not is_url(query):
+                data = {k: getattr(track_result, k) for k in CACHED_FIELDS}
+                await db.put_cached_track(query_key, video, data)
             track = replace(track_result, requested_by=requester)
             position = await player.enqueue(event.chat_id, track)
             t3 = time.perf_counter()

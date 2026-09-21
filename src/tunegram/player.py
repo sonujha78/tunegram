@@ -235,6 +235,13 @@ class Player:
     def snapshot(self, chat_id: int) -> tuple[Track | None, list[Track]]:
         return self.now_playing.get(chat_id), list(self.queues.get(chat_id, []))
 
+    def active_track_ids(self) -> set[str]:
+        """Ids of tracks that are playing or queued (their cache files must not be deleted)."""
+        ids = {t.id for t in self.now_playing.values()}
+        for queue in self.queues.values():
+            ids.update(t.id for t in queue)
+        return ids
+
     async def position(self, chat_id: int) -> int | None:
         """Seconds played of the current track, or None if unknown."""
         try:
