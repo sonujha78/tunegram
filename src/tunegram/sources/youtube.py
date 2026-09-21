@@ -212,7 +212,7 @@ async def warm_up() -> None:
         pass
 
 
-VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "480"))  # 360, 480 or 720
+VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT") or "480")  # 360, 480 or 720
 VIDEO_FORMAT = (
     f"bv*[height<=?{VIDEO_HEIGHT}][vcodec^=avc1]+ba[ext=m4a]/"
     f"bv*[height<=?{VIDEO_HEIGHT}]+ba/"
