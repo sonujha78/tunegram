@@ -1,0 +1,26 @@
+services:
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider
+    container_name: bgutil-provider
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4416:4416"   # only reachable from this machine
+
+  bot:
+    build: .
+    container_name: tunegram
+    restart: unless-stopped
+    user: "1000:1000"
+    # host network so yt-dlp can reach the PO token provider on 127.0.0.1:4416
+    network_mode: host
+    env_file: .env
+    volumes:
+      - ./data:/app/data        # session, database, cookies and audio cache
+    depends_on:
+      - bgutil-provider
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

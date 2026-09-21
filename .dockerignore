@@ -1,0 +1,13 @@
+.git
+.venv
+data
+.env
+*.session
+*.session-journal
+cookies.txt
+__pycache__
+*.egg-info
+tests
+scripts
+.pytest_cache
+.ruff_cache
