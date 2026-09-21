@@ -44,7 +44,7 @@ def _base_opts() -> dict:
     cookies = os.getenv("YT_COOKIES_FILE")
     if cookies:
         if not os.path.isfile(cookies):
-            raise SourceError(f"YT_COOKIES_FILE set hai par file nahi mili: {cookies}")
+            raise SourceError(f"YT_COOKIES_FILE is set but the file was not found: {cookies}")
         opts["cookiefile"] = cookies
     return opts
 

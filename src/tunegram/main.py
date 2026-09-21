@@ -10,6 +10,8 @@ from tunegram import stats
 from tunegram.config import load_config
 from tunegram.db import Database
 from tunegram.handlers import register_handlers
+from tunegram.music import register_music_handlers
+from tunegram.player import Player
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -28,17 +30,33 @@ async def main() -> None:
     bot = TelegramClient(f"{cfg.data_dir}/bot", cfg.api_id, cfg.api_hash)
     await bot.start(bot_token=cfg.bot_token)
     me = await bot.get_me()
-
     register_handlers(bot, cfg, db, me.username)
+
+    commands = [
+        BotCommand("start", "Open the main menu"),
+        BotCommand("help", "Show commands"),
+        BotCommand("ping", "Check bot latency"),
+    ]
+
+    # Player: PyTgCalls ko event loop chahiye, isliye async main ke andar banao
+    player: Player | None = None
+    if cfg.session_string:
+        player = Player(cfg.api_id, cfg.api_hash, cfg.session_string)
+        name = await player.start()
+        register_music_handlers(bot, player, me.username)
+        commands += [
+            BotCommand("play", "Play a song in the voice chat"),
+            BotCommand("pause", "Pause playback"),
+            BotCommand("resume", "Resume playback"),
+            BotCommand("stop", "Stop and leave the voice chat"),
+        ]
+        log.info("Userbot ready: %s", name)
+    else:
+        log.warning("SESSION_STRING missing: music commands disabled")
+
     await bot(
         SetBotCommandsRequest(
-            scope=BotCommandScopeDefault(),
-            lang_code="",
-            commands=[
-                BotCommand("start", "Open the main menu"),
-                BotCommand("help", "Show commands"),
-                BotCommand("ping", "Check bot latency"),
-            ],
+            scope=BotCommandScopeDefault(), lang_code="", commands=commands
         )
     )
     stats.prime()
@@ -47,6 +65,8 @@ async def main() -> None:
     try:
         await bot.run_until_disconnected()
     finally:
+        if player:
+            await player.close()
         await db.close()
 
 
