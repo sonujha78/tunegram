@@ -12,6 +12,12 @@ class Config:
     api_hash: str
     bot_token: str
     session_string: str = ""
+    bot_name: str = "Music Bot"
+    owner_name: str = "Owner"
+    owner_url: str = ""
+    support_url: str = ""
+    data_dir: str = "data"
+    banner_path: str = "assets/banner.jpg"
 
 
 def _require(name: str) -> str:
@@ -27,4 +33,8 @@ def load_config() -> Config:
         api_hash=_require("API_HASH"),
         bot_token=_require("BOT_TOKEN"),
         session_string=os.getenv("SESSION_STRING", ""),
+        bot_name=os.getenv("BOT_NAME") or "Music Bot",
+        owner_name=os.getenv("OWNER_NAME") or "Owner",
+        owner_url=os.getenv("OWNER_URL", ""),
+        support_url=os.getenv("SUPPORT_URL", ""),
     )

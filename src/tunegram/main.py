@@ -1,10 +1,15 @@
 import asyncio
 import logging
-import time
+from pathlib import Path
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
+from telethon.tl.functions.bots import SetBotCommandsRequest
+from telethon.tl.types import BotCommand, BotCommandScopeDefault
 
-from tunegram.config import Config, load_config
+from tunegram import stats
+from tunegram.config import load_config
+from tunegram.db import Database
+from tunegram.handlers import register_handlers
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
@@ -13,33 +18,40 @@ logging.basicConfig(
 log = logging.getLogger("tunegram")
 
 
-def build_bot(cfg: Config) -> TelegramClient:
-    bot = TelegramClient("tunegram-bot", cfg.api_id, cfg.api_hash)
-
-    @bot.on(events.NewMessage(pattern=r"^/start(?:@\w+)?$"))
-    async def start(event):
-        await event.respond(
-            "Hey! I'm tunegram 🎵\nMusic commands are coming soon. Try /ping."
-        )
-
-    @bot.on(events.NewMessage(pattern=r"^/ping(?:@\w+)?$"))
-    async def ping(event):
-        t0 = time.perf_counter()
-        msg = await event.respond("Pong!")
-        ms = (time.perf_counter() - t0) * 1000
-        await msg.edit(f"Pong! `{ms:.0f} ms`")
-
-    return bot
-
-
 async def main() -> None:
     cfg = load_config()
-    bot = build_bot(cfg)
+    Path(cfg.data_dir).mkdir(parents=True, exist_ok=True)
+
+    db = Database(f"{cfg.data_dir}/tunegram.db")
+    await db.connect()
+
+    bot = TelegramClient(f"{cfg.data_dir}/bot", cfg.api_id, cfg.api_hash)
     await bot.start(bot_token=cfg.bot_token)
     me = await bot.get_me()
+
+    register_handlers(bot, cfg, db, me.username)
+    await bot(
+        SetBotCommandsRequest(
+            scope=BotCommandScopeDefault(),
+            lang_code="",
+            commands=[
+                BotCommand("start", "Open the main menu"),
+                BotCommand("help", "Show commands"),
+                BotCommand("ping", "Check bot latency"),
+            ],
+        )
+    )
+    stats.prime()
     log.info("Bot started as @%s", me.username)
-    await bot.run_until_disconnected()
+
+    try:
+        await bot.run_until_disconnected()
+    finally:
+        await db.close()
 
 
 def run() -> None:
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        log.info("Shutting down")

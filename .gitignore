@@ -7,3 +7,5 @@ __pycache__/
 downloads/
 .pytest_cache/
 .ruff_cache/
+*.egg-info/
+data/

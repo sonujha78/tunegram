@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: tunegram
-Version: 0.1.0
-Summary: A Telegram music bot focused on clean, high-quality playback.
-Requires-Python: >=3.10
-License-File: LICENSE
-Requires-Dist: python-dotenv>=1.0
-Requires-Dist: telethon>=1.36
-Dynamic: license-file
